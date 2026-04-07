@@ -58,7 +58,7 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     //--------------------------------------------------------------------------
     // Build topic names
     //--------------------------------------------------------------------------
-    const std::string gps_topic   = "/" + robot_name_ + "/sensors/ublox/fix";
+    const std::string gps_topic   = "/" + robot_name_ + "/sensors/geofog/gps/fix";
     const std::string imu_topic   = "/" + robot_name_ + "/sensors/microstrain/ekf/imu/data";
     const std::string speed_topic = "/" + robot_name_ + "/gps_speed";
 
