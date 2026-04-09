@@ -30,11 +30,15 @@
 //   steady-state driving) passes through normally.
 //
 // SUBSCRIBES:
-//   /{robot_name}/sensors/ublox/fix                  [sensor_msgs/msg/NavSatFix]
-//       Standard u-blox GPS fix. Must have status >= STATUS_FIX.
+//   /{robot_name}/{gps_topic_suffix}                 [sensor_msgs/msg/NavSatFix]
+//       GPS fix. Topic suffix driven by the 'gps_topic_suffix' parameter so
+//       this node works with both GeoFog and u-blox hardware variants without
+//       recompilation. Default suffix: "sensors/geofog/gps/fix".
 //
-//   /{robot_name}/sensors/microstrain/ekf/imu/data   [sensor_msgs/msg/Imu]
+//   /{robot_name}/{imu_topic_suffix}                 [sensor_msgs/msg/Imu]
 //       EKF-filtered IMU. angular_velocity.z used to detect rotation-in-place.
+//       Topic suffix driven by the 'imu_topic_suffix' parameter.
+//       Default suffix: "sensors/microstrain/ekf/imu/data".
 //
 // PUBLISHES:
 //   /{robot_name}/gps_speed  [std_msgs/msg/Float64]
@@ -45,6 +49,18 @@
 //
 // PARAMETERS:
 //   robot_name                (string, required) — Robot namespace, e.g. "warthog1"
+//   gps_topic_suffix          (string, "sensors/geofog/gps/fix")
+//                                                — GPS topic path after /{robot_name}/.
+//                                                  Set to "sensors/geofog/gps/fix" for
+//                                                  GeoFog hardware (NAI_2, testing) or
+//                                                  "sensors/ublox/fix" for u-blox
+//                                                  (NAI_3, NAI_4). Driven by the active
+//                                                  profile's gps_topic_suffix in
+//                                                  petaar26/experiment/profiles.json.
+//   imu_topic_suffix          (string, "sensors/microstrain/ekf/imu/data")
+//                                                — IMU topic path after /{robot_name}/.
+//                                                  Change if your IMU driver publishes
+//                                                  to a different topic.
 //   min_time_delta_s          (double, 0.05)     — Minimum seconds between GPS
 //                                                  samples; guards divide-by-zero
 //   min_distance_m            (double, 0.05)     — Minimum displacement in meters

@@ -37,11 +37,32 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     this->declare_parameter<double>("max_rotation_rate_rad_s",         0.2);
     this->declare_parameter<double>("rotation_gate_override_distance_m", 0.3);
 
+    // Topic suffix parameters.
+    // WHY PARAMETERS AND NOT HARDCODED:
+    //   The PETAAR study deploys two GPS hardware variants across conditions:
+    //     - GeoFog GNSS  → "sensors/geofog/gps/fix"  (NAI_2, testing profiles)
+    //     - u-blox GNSS  → "sensors/ublox/fix"        (NAI_3, NAI_4 profiles)
+    //   The active suffix is selected per-profile in petaar26/experiment/profiles.json
+    //   and passed here by gps_speed.launch.py. Hardcoding either suffix would
+    //   cause this node to receive no GPS data on the other hardware variant.
+    //
+    //   The IMU path is also deployment-specific (driver package name may vary),
+    //   so it is parameterised for the same reason.
+    //
+    // Both params use the historical hardcoded strings as defaults so existing
+    // launch configurations that do not pass these params continue to work.
+    this->declare_parameter<std::string>("gps_topic_suffix",
+        "sensors/geofog/gps/fix");
+    this->declare_parameter<std::string>("imu_topic_suffix",
+        "sensors/microstrain/ekf/imu/data");
+
     min_time_delta_s_                  = this->get_parameter("min_time_delta_s").as_double();
     min_distance_m_                    = this->get_parameter("min_distance_m").as_double();
     max_speed_m_s_                     = this->get_parameter("max_speed_m_s").as_double();
     max_rotation_rate_rad_s_           = this->get_parameter("max_rotation_rate_rad_s").as_double();
     rotation_gate_override_distance_m_ = this->get_parameter("rotation_gate_override_distance_m").as_double();
+    const std::string gps_topic_suffix = this->get_parameter("gps_topic_suffix").as_string();
+    const std::string imu_topic_suffix = this->get_parameter("imu_topic_suffix").as_string();
 
     RCLCPP_INFO(this->get_logger(),
         "Parameters: robot_name=%s  min_time_delta=%.3fs  min_distance=%.3fm  "
@@ -56,10 +77,15 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
         rotation_gate_override_distance_m_);
 
     //--------------------------------------------------------------------------
-    // Build topic names
+    // Build topic names from parameters
+    // WHY ABSOLUTE PATHS (leading slash):
+    //   This node is launched WITHOUT a ROS2 namespace (the node is named
+    //   globally as gps_speed_node rather than under /warthog1/). Absolute
+    //   topic paths ensure subscribers reach the correct namespaced topics
+    //   regardless of any executor-level namespace settings.
     //--------------------------------------------------------------------------
-    const std::string gps_topic   = "/" + robot_name_ + "/sensors/geofog/gps/fix";
-    const std::string imu_topic   = "/" + robot_name_ + "/sensors/microstrain/ekf/imu/data";
+    const std::string gps_topic   = "/" + robot_name_ + "/" + gps_topic_suffix;
+    const std::string imu_topic   = "/" + robot_name_ + "/" + imu_topic_suffix;
     const std::string speed_topic = "/" + robot_name_ + "/gps_speed";
 
     //--------------------------------------------------------------------------
