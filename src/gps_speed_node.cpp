@@ -31,26 +31,28 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
         throw std::runtime_error("Missing required parameter: robot_name");
     }
 
+    // use_status_speed: when true (default), subscribe to the hardware odometry
+    // speed topic and use it as a standstill gate. If status_speed < standstill_
+    // threshold_m_s, the GPS computation is skipped entirely and 0.0 is published.
+    // Falls back to no standstill gate if the topic hasn't published yet, with a
+    // throttled warning so the operator knows.
+    this->declare_parameter<bool>("use_status_speed", true);
+    use_status_speed_ = this->get_parameter("use_status_speed").as_bool();
+
+    this->declare_parameter<std::string>("status_speed_topic_suffix", "status_speed");
+    const std::string status_speed_suffix =
+        this->get_parameter("status_speed_topic_suffix").as_string();
+
+    this->declare_parameter<double>("standstill_threshold_m_s", 0.05);
+    standstill_threshold_m_s_ = this->get_parameter("standstill_threshold_m_s").as_double();
+
     this->declare_parameter<double>("min_time_delta_s",                0.05);
     this->declare_parameter<double>("min_distance_m",                  0.05);
     this->declare_parameter<double>("max_speed_m_s",                  20.0);
     this->declare_parameter<double>("max_rotation_rate_rad_s",         0.2);
     this->declare_parameter<double>("rotation_gate_override_distance_m", 0.3);
 
-    // Topic suffix parameters.
-    // WHY PARAMETERS AND NOT HARDCODED:
-    //   The PETAAR study deploys two GPS hardware variants across conditions:
-    //     - GeoFog GNSS  → "sensors/geofog/gps/fix"  (NAI_2, testing profiles)
-    //     - u-blox GNSS  → "sensors/ublox/fix"        (NAI_3, NAI_4 profiles)
-    //   The active suffix is selected per-profile in petaar26/experiment/profiles.json
-    //   and passed here by gps_speed.launch.py. Hardcoding either suffix would
-    //   cause this node to receive no GPS data on the other hardware variant.
-    //
-    //   The IMU path is also deployment-specific (driver package name may vary),
-    //   so it is parameterised for the same reason.
-    //
-    // Both params use the historical hardcoded strings as defaults so existing
-    // launch configurations that do not pass these params continue to work.
+    // Topic suffix parameters — see header for rationale.
     this->declare_parameter<std::string>("gps_topic_suffix",
         "sensors/geofog/gps/fix");
     this->declare_parameter<std::string>("imu_topic_suffix",
@@ -65,10 +67,14 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     const std::string imu_topic_suffix = this->get_parameter("imu_topic_suffix").as_string();
 
     RCLCPP_INFO(this->get_logger(),
-        "Parameters: robot_name=%s  min_time_delta=%.3fs  min_distance=%.3fm  "
-        "max_speed=%.1fm/s  max_rotation_rate=%.3frad/s (%.1f deg/s)  "
+        "Parameters: robot_name=%s  use_status_speed=%s  "
+        "standstill_threshold=%.3fm/s  min_time_delta=%.3fs  "
+        "min_distance=%.3fm  max_speed=%.1fm/s  "
+        "max_rotation_rate=%.3frad/s (%.1fdeg/s)  "
         "rotation_gate_override=%.3fm",
         robot_name_.c_str(),
+        use_status_speed_ ? "true" : "false",
+        standstill_threshold_m_s_,
         min_time_delta_s_,
         min_distance_m_,
         max_speed_m_s_,
@@ -78,21 +84,17 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
 
     //--------------------------------------------------------------------------
     // Build topic names from parameters
-    // WHY ABSOLUTE PATHS (leading slash):
-    //   This node is launched WITHOUT a ROS2 namespace (the node is named
-    //   globally as gps_speed_node rather than under /warthog1/). Absolute
-    //   topic paths ensure subscribers reach the correct namespaced topics
-    //   regardless of any executor-level namespace settings.
     //--------------------------------------------------------------------------
-    const std::string gps_topic   = "/" + robot_name_ + "/" + gps_topic_suffix;
-    const std::string imu_topic   = "/" + robot_name_ + "/" + imu_topic_suffix;
-    const std::string speed_topic = "/" + robot_name_ + "/gps_speed";
+    const std::string gps_topic          = "/" + robot_name_ + "/" + gps_topic_suffix;
+    const std::string imu_topic          = "/" + robot_name_ + "/" + imu_topic_suffix;
+    const std::string status_speed_topic = "/" + robot_name_ + "/" + status_speed_suffix;
+    const std::string speed_topic        = "/" + robot_name_ + "/sensors/gps_speed";
 
     //--------------------------------------------------------------------------
     // Subscribers
     //--------------------------------------------------------------------------
 
-    // GPS: SensorDataQoS (best-effort) to match the u-blox driver.
+    // GPS: SensorDataQoS (best-effort) to match the u-blox / GeoFog driver.
     gps_sub_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
         gps_topic,
         rclcpp::SensorDataQoS(),
@@ -101,14 +103,29 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
         });
 
     // IMU: SensorDataQoS (best-effort) to match the Microstrain driver.
-    // The IMU updates much faster than GPS (~100-500 Hz vs ~9 Hz), so by the
-    // time a GPS callback fires, latest_yaw_rate_rad_s_ is always current.
+    // Updates at ~100-500 Hz so latest_yaw_rate_rad_s_ is always current
+    // by the time a GPS callback fires at ~9 Hz.
     imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic,
         rclcpp::SensorDataQoS(),
         [this](sensor_msgs::msg::Imu::SharedPtr msg) {
             this->imu_callback(msg);
         });
+
+    // status_speed: only subscribed when use_status_speed=true.
+    // WHY CONDITIONAL: if false the user has explicitly opted out of the
+    // standstill gate. Creating the subscription anyway would add confusion
+    // to ros2 topic info output and unnecessary callbacks on platforms that
+    // don't publish this topic.
+    if (use_status_speed_)
+    {
+        status_speed_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+            status_speed_topic,
+            rclcpp::SensorDataQoS(),
+            [this](std_msgs::msg::Float64::SharedPtr msg) {
+                this->status_speed_callback(msg);
+            });
+    }
 
     //--------------------------------------------------------------------------
     // Publisher
@@ -117,31 +134,85 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
         speed_topic,
         rclcpp::SensorDataQoS());
 
+    //--------------------------------------------------------------------------
+    // Startup log
+    //--------------------------------------------------------------------------
     RCLCPP_INFO(this->get_logger(), "Subscribed to GPS:   %s", gps_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "Subscribed to IMU:   %s", imu_topic.c_str());
+
+    if (use_status_speed_)
+    {
+        RCLCPP_INFO(this->get_logger(),
+            "Subscribed to status_speed: %s  "
+            "(standstill gate: will suppress GPS noise when < %.3f m/s; "
+            "waiting for first message before gate is active)",
+            status_speed_topic.c_str(),
+            standstill_threshold_m_s_);
+    }
+    else
+    {
+        RCLCPP_WARN(this->get_logger(),
+            "use_status_speed=false — standstill gate disabled. "
+            "GPS noise at standstill will propagate to output. "
+            "Tune min_distance_m to suppress noise manually, or set "
+            "use_status_speed:=true if the platform publishes %s.",
+            status_speed_topic.c_str());
+    }
+
     RCLCPP_INFO(this->get_logger(), "Publishing speed to: %s", speed_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "Waiting for first GPS fix...");
 }
 
 //==============================================================================
-// IMU CALLBACK — just cache the yaw rate
+// STATUS SPEED CALLBACK — cache hardware odometry speed for standstill gate
+//==============================================================================
+
+void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float64::SharedPtr msg)
+{
+    latest_status_speed_m_s_.store(msg->data);
+
+    // Flip the received flag on the first message so gps_callback knows the
+    // gate is now active. Log once for operator confirmation.
+    if (!status_speed_received_.load())
+    {
+        status_speed_received_.store(true);
+        RCLCPP_INFO(this->get_logger(),
+            "status_speed topic is live (first message: %.4f m/s). "
+            "Standstill gate is now active — GPS noise below %.3f m/s "
+            "will be suppressed.",
+            msg->data, standstill_threshold_m_s_);
+    }
+}
+
+//==============================================================================
+// IMU CALLBACK — cache yaw rate for rotation gate
 //==============================================================================
 
 void GpsSpeedNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
 {
-    // angular_velocity.z is the yaw rate in rad/s (positive = counter-clockwise).
-    // Store atomically so gps_callback can read it safely.
+    // angular_velocity.z is yaw rate in rad/s (positive = CCW).
     latest_yaw_rate_rad_s_.store(msg->angular_velocity.z);
 }
 
 //==============================================================================
 // GPS CALLBACK — compute and publish speed
+//
+// Gates applied in order:
+//   1. Invalid fix rejection
+//   2. Standstill gate (status_speed, if enabled and received)
+//   3. First-fix anchor
+//   4. Time delta guard
+//   5. Haversine distance
+//   6. Rotation gate
+//   7. Min distance
+//   8. Max speed sanity
+//   9. Publish + advance anchor
 //==============================================================================
 
 void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
 {
     //--------------------------------------------------------------------------
-    // Reject invalid fixes
+    // Gate 1: Reject invalid fixes
     //--------------------------------------------------------------------------
     if (msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX)
     {
@@ -156,7 +227,65 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     }
 
     //--------------------------------------------------------------------------
-    // First fix: nothing to diff against yet
+    // Gate 2: Standstill gate
+    //
+    // If use_status_speed=true AND the status_speed topic has published at
+    // least once, check whether the platform odometry confirms standstill.
+    //
+    // WHY "at least once" before activating:
+    //   At node startup the status_speed topic may not have published yet.
+    //   We don't want to permanently suppress output because of a cold-start
+    //   race. Once the first message arrives (status_speed_received_ = true),
+    //   the gate is active for the lifetime of the node.
+    //
+    // WHY RESET prev_sample_ HERE:
+    //   If we hold the anchor across a standstill, the first post-standstill
+    //   fix diffs against the pre-stop position, producing a spurious speed
+    //   spike. Resetting the anchor forces a clean re-anchor on the first
+    //   post-standstill fix (which publishes 0.0 via the first-fix path),
+    //   so speed is computed correctly from the second moving fix onward.
+    //
+    // WHY NOT JUST SUPPRESS OUTPUT WITHOUT RESETTING:
+    //   Suppressing without resetting is tempting but wrong — the GPS antenna
+    //   can drift by 0.5–2.0 m during a long standstill. Keeping the stale
+    //   anchor means the first moving sample measures that drift as speed.
+    //--------------------------------------------------------------------------
+    if (use_status_speed_)
+    {
+        if (!status_speed_received_.load())
+        {
+            // Topic not yet live — warn periodically and fall through to
+            // normal computation. This is the startup fallback window.
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                "use_status_speed=true but no status_speed message received yet — "
+                "standstill gate inactive. Check that %s is publishing. "
+                "This warning disappears once the first message arrives.",
+                ("/" + robot_name_ + "/" +
+                 this->get_parameter("status_speed_topic_suffix").as_string()).c_str());
+        }
+        else if (latest_status_speed_m_s_.load() < standstill_threshold_m_s_)
+        {
+            // STATE: STANDSTILL — robot is not moving.
+            // Suppress GPS noise and invalidate the anchor.
+            if (prev_sample_.has_value())
+            {
+                RCLCPP_DEBUG(this->get_logger(),
+                    "Standstill gate: status_speed=%.4f m/s < %.4f m/s threshold — "
+                    "resetting GPS anchor and publishing 0.0.",
+                    latest_status_speed_m_s_.load(), standstill_threshold_m_s_);
+                prev_sample_.reset();
+            }
+
+            auto out = std_msgs::msg::Float64();
+            out.data = 0.0;
+            speed_pub_->publish(out);
+            return;
+        }
+        // else: status_speed >= threshold → robot is moving, fall through.
+    }
+
+    //--------------------------------------------------------------------------
+    // Gate 3: First fix — nothing to diff against yet
     //--------------------------------------------------------------------------
     const rclcpp::Time current_stamp = msg->header.stamp;
 
@@ -176,7 +305,7 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     }
 
     //--------------------------------------------------------------------------
-    // Time delta guard
+    // Gate 4: Time delta guard
     //--------------------------------------------------------------------------
     const double dt_s = (current_stamp - prev_sample_->stamp).seconds();
 
@@ -189,25 +318,24 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     }
 
     //--------------------------------------------------------------------------
-    // Haversine distance — computed before the rotation gate so we can use
-    // the displacement to decide whether to override it.
+    // Gate 5 (setup): Haversine distance
+    // Computed before the rotation gate so the displacement can override it.
     //--------------------------------------------------------------------------
     const double distance_m = haversine_distance_m(
         prev_sample_->lat_deg, prev_sample_->lon_deg,
         msg->latitude,         msg->longitude);
 
     //--------------------------------------------------------------------------
-    // Rotation gate — suppress false speed caused by spinning in place, BUT
-    // override if the displacement is large enough to be real translational
-    // motion rather than antenna-circle + GPS jitter.
+    // Gate 5: Rotation gate
     //
-    // Example: robot moving at 3 m/s while turning — displacement per fix
-    // is ~0.33m which exceeds the default override threshold of 0.3m, so the
-    // speed is reported even though yaw rate is high.
+    // Suppress false speed caused by the GPS antenna tracing an arc when
+    // the robot spins in place. Bypassed if displacement is large enough to
+    // indicate the robot is genuinely translating while turning.
     //
-    // Example: robot spinning in place — displacement per fix is <0.1m
-    // (antenna offset noise), well below the override threshold, so 0.0 is
-    // published and prev_sample_ is NOT advanced.
+    // Note: the standstill gate (Gate 2) already handles the zero-speed case.
+    // The rotation gate handles the separate case where status_speed > 0 but
+    // the motion is rotational — e.g. pivoting on one track — where GPS
+    // displacement is non-zero but represents antenna arc, not translation.
     //--------------------------------------------------------------------------
     const double yaw_rate = std::abs(latest_yaw_rate_rad_s_.load());
 
@@ -215,16 +343,15 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     {
         if (distance_m >= rotation_gate_override_distance_m_)
         {
-            // Large displacement — robot is genuinely translating even while
-            // turning. Let the speed through and log it.
+            // Large displacement — genuine translation while turning.
             RCLCPP_DEBUG(this->get_logger(),
                 "Rotation gate OVERRIDDEN: |yaw_rate|=%.3f rad/s but "
-                "distance=%.4fm >= override threshold=%.4fm — reporting speed.",
+                "distance=%.4fm >= override=%.4fm — reporting speed.",
                 yaw_rate, distance_m, rotation_gate_override_distance_m_);
         }
         else
         {
-            // Small displacement — this is rotation-in-place noise. Suppress.
+            // Small displacement — rotation-in-place noise. Suppress.
             RCLCPP_DEBUG(this->get_logger(),
                 "Rotation gate: |yaw_rate|=%.3f rad/s (%.1f deg/s), "
                 "distance=%.4fm < override=%.4fm — publishing 0.0.",
@@ -234,14 +361,13 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
             auto out = std_msgs::msg::Float64();
             out.data = 0.0;
             speed_pub_->publish(out);
-            // Don't advance prev_sample_ — keep the pre-rotation anchor intact
-            // so the next post-rotation fix diffs against a clean reference.
+            // Don't advance anchor — keep the pre-rotation reference intact.
             return;
         }
     }
 
     //--------------------------------------------------------------------------
-    // Below minimum distance → robot is still (or fix noise)
+    // Gate 6: Min distance — robot is still or fix noise is below threshold
     //--------------------------------------------------------------------------
     double speed_m_s = 0.0;
 
@@ -249,8 +375,9 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     {
         speed_m_s = distance_m / dt_s;
 
-        // Sanity check: discard GPS jumps. Don't advance prev_sample_ so the
-        // next good fix diffs against a trustworthy anchor.
+        // Gate 7: Max speed sanity — discard GPS jumps (multipath, atmospheric).
+        // Don't advance anchor so the next good fix diffs against a trustworthy
+        // reference position.
         if (speed_m_s > max_speed_m_s_)
         {
             RCLCPP_WARN(this->get_logger(),
@@ -269,8 +396,11 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
     speed_pub_->publish(out);
 
     RCLCPP_DEBUG(this->get_logger(),
-        "Speed: %.3f m/s  (distance=%.4fm, dt=%.4fs, yaw_rate=%.3f rad/s)",
-        speed_m_s, distance_m, dt_s, yaw_rate);
+        "Speed: %.3f m/s  (distance=%.4fm, dt=%.4fs, "
+        "yaw_rate=%.3f rad/s, status_speed=%.3f m/s)",
+        speed_m_s, distance_m, dt_s,
+        yaw_rate,
+        use_status_speed_ ? latest_status_speed_m_s_.load() : -1.0);
 
     prev_sample_ = GpsSample{msg->latitude, msg->longitude, current_stamp};
 }
