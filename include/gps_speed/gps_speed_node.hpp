@@ -69,7 +69,7 @@
 //       EKF-filtered IMU. angular_velocity.z used for rotation gate.
 //       Default: "sensors/microstrain/ekf/imu/data".
 //
-//   /{robot_name}/{status_speed_topic_suffix}         [std_msgs/msg/Float64]
+//   /{robot_name}/{status_speed_topic_suffix}         [std_msgs/msg/Float32]
 //       Hardware odometry speed in m/s. Subscribed when use_status_speed=true.
 //       Used as the standstill gate: if value < standstill_threshold_m_s,
 //       output is forced to 0.0 and the GPS anchor is reset.
@@ -148,6 +148,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/float64.hpp>
 
 #include <atomic>
@@ -173,7 +174,8 @@ private:
 
     /// Called on every incoming status_speed message. Caches hardware speed
     /// for the standstill gate. Only subscribed when use_status_speed_=true.
-    void status_speed_callback(const std_msgs::msg::Float64::SharedPtr msg);
+    /// NOTE: status_speed publishes std_msgs/Float32, not Float64.
+    void status_speed_callback(const std_msgs::msg::Float32::SharedPtr msg);
 
     //==========================================================================
     // MATH HELPERS
@@ -193,7 +195,7 @@ private:
     // --- ROS interfaces ---
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr        imu_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr        status_speed_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr        status_speed_sub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr           speed_pub_;
 
     // --- Parameters ---
