@@ -7,6 +7,7 @@
 #include "gps_speed/gps_speed_node.hpp"
 
 #include <sensor_msgs/msg/nav_sat_status.hpp>
+#include <std_msgs/msg/float32.hpp>
 
 static constexpr double EARTH_RADIUS_M = 6'371'000.0;
 
@@ -88,7 +89,7 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     const std::string gps_topic          = "/" + robot_name_ + "/" + gps_topic_suffix;
     const std::string imu_topic          = "/" + robot_name_ + "/" + imu_topic_suffix;
     const std::string status_speed_topic = "/" + robot_name_ + "/" + status_speed_suffix;
-    const std::string speed_topic        = "/" + robot_name_ + "/sensors/gps_speed";
+    const std::string speed_topic        = "/" + robot_name_ + "/gps_speed";
 
     //--------------------------------------------------------------------------
     // Subscribers
@@ -119,10 +120,10 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     // don't publish this topic.
     if (use_status_speed_)
     {
-        status_speed_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+        status_speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
             status_speed_topic,
             rclcpp::SensorDataQoS(),
-            [this](std_msgs::msg::Float64::SharedPtr msg) {
+            [this](std_msgs::msg::Float32::SharedPtr msg) {
                 this->status_speed_callback(msg);
             });
     }
@@ -159,7 +160,7 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
             status_speed_topic.c_str());
     }
 
-    RCLCPP_INFO(this->get_logger(), "Publishing speed to: %s", speed_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "Publishing speed to:  %s", speed_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "Waiting for first GPS fix...");
 }
 
@@ -167,7 +168,7 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
 // STATUS SPEED CALLBACK — cache hardware odometry speed for standstill gate
 //==============================================================================
 
-void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float64::SharedPtr msg)
+void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float32::SharedPtr msg)
 {
     latest_status_speed_m_s_.store(msg->data);
 
