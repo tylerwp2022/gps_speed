@@ -40,6 +40,11 @@ ARGUMENTS:
                                     (default: true)
     status_speed_topic_suffix     — Topic suffix for hardware speed, under
                                     /{robot_name}/. (default: "status_speed")
+    status_speed_reliability      — QoS reliability for the status_speed subscription.
+                                    Must match the publisher's QoS or DDS will silently
+                                    drop messages. Use 'ros2 topic info /{robot}/status_speed
+                                    --verbose' to check. Options: "reliable", "best_effort".
+                                    (default: "reliable")
     standstill_threshold_m_s      — status_speed below this → suppress GPS output
                                     and reset anchor. (default: 0.05 m/s)
     min_time_delta_s              — Min seconds between GPS samples (default: 0.05)
@@ -110,6 +115,22 @@ def generate_launch_description():
             "Only used when use_status_speed=true. "
             "Node subscribes to /{robot_name}/{status_speed_topic_suffix}. "
             "Default: 'status_speed'."
+        )
+    )
+
+    # status_speed_reliability — QoS reliability for the status_speed subscription.
+    # Default "reliable" because the safer failure mode is RELIABLE sub ↔ BEST_EFFORT
+    # publisher (degrades gracefully), vs BEST_EFFORT sub ↔ RELIABLE publisher
+    # (silently drops all messages after discovery handshake).
+    # Run 'ros2 topic info /{robot}/status_speed --verbose' to verify publisher QoS.
+    status_speed_reliability_arg = DeclareLaunchArgument(
+        "status_speed_reliability",
+        default_value="best_effort",
+        description=(
+            "QoS reliability for the status_speed subscription. "
+            "Must match the publisher's QoS or DDS silently drops messages. "
+            "Options: 'reliable' (default), 'best_effort'. "
+            "Check with: ros2 topic info /{robot_name}/status_speed --verbose"
         )
     )
 
@@ -204,6 +225,7 @@ def generate_launch_description():
             "robot_name":                        LaunchConfiguration("robot_name"),
             "use_status_speed":                  LaunchConfiguration("use_status_speed"),
             "status_speed_topic_suffix":         LaunchConfiguration("status_speed_topic_suffix"),
+            "status_speed_reliability":          LaunchConfiguration("status_speed_reliability"),
             "standstill_threshold_m_s":          LaunchConfiguration("standstill_threshold_m_s"),
             "gps_topic_suffix":                  LaunchConfiguration("gps_topic_suffix"),
             "imu_topic_suffix":                  LaunchConfiguration("imu_topic_suffix"),
@@ -221,6 +243,7 @@ def generate_launch_description():
         robot_name_arg,
         use_status_speed_arg,
         status_speed_topic_suffix_arg,
+        status_speed_reliability_arg,
         standstill_threshold_arg,
         gps_topic_suffix_arg,
         imu_topic_suffix_arg,

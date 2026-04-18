@@ -44,6 +44,26 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     const std::string status_speed_suffix =
         this->get_parameter("status_speed_topic_suffix").as_string();
 
+    // status_speed_reliability: controls QoS reliability of the status_speed
+    // subscription. Must match the publisher's reliability setting or DDS will
+    // silently drop all messages after the discovery handshake.
+    //   "reliable"   — use when publisher is RELIABLE (e.g. Clearpath status_processor)
+    //   "best_effort"— use when publisher is BEST_EFFORT (e.g. some sensor drivers)
+    // Default: "reliable" — the safer default since a RELIABLE sub connecting to
+    // a BEST_EFFORT publisher degrades gracefully (receives messages), whereas a
+    // BEST_EFFORT sub connecting to a RELIABLE publisher drops all messages silently.
+    this->declare_parameter<std::string>("status_speed_reliability", "best_effort");
+    const std::string status_speed_reliability =
+        this->get_parameter("status_speed_reliability").as_string();
+
+    if (status_speed_reliability != "reliable" && status_speed_reliability != "best_effort")
+    {
+        RCLCPP_FATAL(this->get_logger(),
+            "Invalid status_speed_reliability='%s'. Must be 'reliable' or 'best_effort'.",
+            status_speed_reliability.c_str());
+        throw std::runtime_error("Invalid parameter: status_speed_reliability");
+    }
+
     this->declare_parameter<double>("standstill_threshold_m_s", 0.05);
     standstill_threshold_m_s_ = this->get_parameter("standstill_threshold_m_s").as_double();
 
@@ -120,14 +140,31 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     // don't publish this topic.
     if (use_status_speed_)
     {
+        // Build QoS from the status_speed_reliability parameter.
+        // WHY PARAMETERISED: different platforms publish status_speed with
+        // different QoS profiles. DDS silently drops all messages when a
+        // BEST_EFFORT subscriber connects to a RELIABLE publisher (the sub
+        // receives at most the first discovery-handshake message, then nothing).
+        // The reverse (RELIABLE sub ↔ BEST_EFFORT publisher) degrades gracefully.
+        // Use 'ros2 topic info /robot/status_speed --verbose' to check the
+        // publisher's QoS and set this parameter to match.
+        rclcpp::QoS status_speed_qos(rclcpp::KeepLast(5));
+        if (status_speed_reliability == "reliable")
+        {
+            status_speed_qos.reliable();
+        }
+        else
+        {
+            status_speed_qos.best_effort();
+        }
+
         status_speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
             status_speed_topic,
-            rclcpp::SensorDataQoS(),
+            status_speed_qos,
             [this](std_msgs::msg::Float32::SharedPtr msg) {
                 this->status_speed_callback(msg);
             });
     }
-
     //--------------------------------------------------------------------------
     // Publisher
     //--------------------------------------------------------------------------
@@ -144,10 +181,11 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     if (use_status_speed_)
     {
         RCLCPP_INFO(this->get_logger(),
-            "Subscribed to status_speed: %s  "
+            "Subscribed to status_speed: %s  [QoS: %s]  "
             "(standstill gate: will suppress GPS noise when < %.3f m/s; "
             "waiting for first message before gate is active)",
             status_speed_topic.c_str(),
+            status_speed_reliability.c_str(),
             standstill_threshold_m_s_);
     }
     else
