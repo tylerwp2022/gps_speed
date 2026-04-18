@@ -44,7 +44,12 @@ ARGUMENTS:
                                     Must match the publisher's QoS or DDS will silently
                                     drop messages. Use 'ros2 topic info /{robot}/status_speed
                                     --verbose' to check. Options: "reliable", "best_effort".
-                                    (default: "reliable")
+                                    (default: "best_effort")
+    use_status_speed_as_primary   — When true, bypass the GPS/Haversine pipeline entirely
+                                    and republish status_speed directly as the speed output.
+                                    Requires use_status_speed=true. Values below
+                                    standstill_threshold_m_s are published as 0.0.
+                                    (default: false)
     standstill_threshold_m_s      — status_speed below this → suppress GPS output
                                     and reset anchor. (default: 0.05 m/s)
     min_time_delta_s              — Min seconds between GPS samples (default: 0.05)
@@ -131,6 +136,20 @@ def generate_launch_description():
             "Must match the publisher's QoS or DDS silently drops messages. "
             "Options: 'reliable' (default), 'best_effort'. "
             "Check with: ros2 topic info /{robot_name}/status_speed --verbose"
+        )
+    )
+
+    # use_status_speed_as_primary — when true, skip GPS entirely and relay
+    # status_speed straight to the gps_speed output topic.
+    use_status_speed_as_primary_arg = DeclareLaunchArgument(
+        "use_status_speed_as_primary",
+        default_value="false",
+        description=(
+            "When true, bypass the GPS/Haversine pipeline entirely and republish "
+            "status_speed directly as the speed output. Requires use_status_speed=true. "
+            "Values below standstill_threshold_m_s are published as 0.0. "
+            "Useful on platforms where hardware odometry is cleaner than GPS-differencing "
+            "(e.g. Clearpath Warthog with GeoFog). Default: false."
         )
     )
 
@@ -226,6 +245,7 @@ def generate_launch_description():
             "use_status_speed":                  LaunchConfiguration("use_status_speed"),
             "status_speed_topic_suffix":         LaunchConfiguration("status_speed_topic_suffix"),
             "status_speed_reliability":          LaunchConfiguration("status_speed_reliability"),
+            "use_status_speed_as_primary":       LaunchConfiguration("use_status_speed_as_primary"),
             "standstill_threshold_m_s":          LaunchConfiguration("standstill_threshold_m_s"),
             "gps_topic_suffix":                  LaunchConfiguration("gps_topic_suffix"),
             "imu_topic_suffix":                  LaunchConfiguration("imu_topic_suffix"),
@@ -244,6 +264,7 @@ def generate_launch_description():
         use_status_speed_arg,
         status_speed_topic_suffix_arg,
         status_speed_reliability_arg,
+        use_status_speed_as_primary_arg,
         standstill_threshold_arg,
         gps_topic_suffix_arg,
         imu_topic_suffix_arg,

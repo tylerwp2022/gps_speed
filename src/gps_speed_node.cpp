@@ -40,6 +40,37 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     this->declare_parameter<bool>("use_status_speed", true);
     use_status_speed_ = this->get_parameter("use_status_speed").as_bool();
 
+    // use_status_speed_as_primary: when true, bypass the GPS/Haversine pipeline
+    // entirely and republish status_speed directly as the speed output.
+    //
+    // WHY THIS MODE EXISTS:
+    //   On platforms where hardware odometry is already clean and reliable
+    //   (e.g. Clearpath Warthog with GeoFog + accurate wheel encoders), the
+    //   status_speed signal is a better speed source than GPS-differencing —
+    //   it has no multipath noise, no anchor-reset latency, and updates at a
+    //   consistent rate. In this mode the node acts as a simple type-converting
+    //   relay: Float32 status_speed → Float64 gps_speed, with |value| so
+    //   negative encoder noise at standstill publishes as 0.0-equivalent.
+    //
+    // IMPLICATIONS:
+    //   - GPS and IMU subscriptions are still created (topic names are logged)
+    //     but their callbacks do nothing when this flag is true.
+    //   - use_status_speed is implicitly true when this flag is set; setting
+    //     use_status_speed_as_primary=true and use_status_speed=false is a
+    //     configuration error and will be caught at startup.
+    //   - standstill_threshold_m_s still applies: values below it publish 0.0.
+    this->declare_parameter<bool>("use_status_speed_as_primary", false);
+    use_status_speed_as_primary_ = this->get_parameter("use_status_speed_as_primary").as_bool();
+
+    if (use_status_speed_as_primary_ && !use_status_speed_)
+    {
+        RCLCPP_FATAL(this->get_logger(),
+            "use_status_speed_as_primary=true requires use_status_speed=true. "
+            "Set use_status_speed:=true or disable use_status_speed_as_primary.");
+        throw std::runtime_error(
+            "Invalid config: use_status_speed_as_primary=true but use_status_speed=false");
+    }
+
     this->declare_parameter<std::string>("status_speed_topic_suffix", "status_speed");
     const std::string status_speed_suffix =
         this->get_parameter("status_speed_topic_suffix").as_string();
@@ -89,12 +120,14 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
 
     RCLCPP_INFO(this->get_logger(),
         "Parameters: robot_name=%s  use_status_speed=%s  "
+        "use_status_speed_as_primary=%s  "
         "standstill_threshold=%.3fm/s  min_time_delta=%.3fs  "
         "min_distance=%.3fm  max_speed=%.1fm/s  "
         "max_rotation_rate=%.3frad/s (%.1fdeg/s)  "
         "rotation_gate_override=%.3fm",
         robot_name_.c_str(),
         use_status_speed_ ? "true" : "false",
+        use_status_speed_as_primary_ ? "true" : "false",
         standstill_threshold_m_s_,
         min_time_delta_s_,
         min_distance_m_,
@@ -178,7 +211,18 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(this->get_logger(), "Subscribed to GPS:   %s", gps_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "Subscribed to IMU:   %s", imu_topic.c_str());
 
-    if (use_status_speed_)
+    if (use_status_speed_as_primary_)
+    {
+        RCLCPP_INFO(this->get_logger(),
+            "MODE: status_speed_as_primary — GPS/Haversine pipeline bypassed. "
+            "Republishing %s  [QoS: %s]  directly to %s. "
+            "Values below %.3f m/s (abs) will be published as 0.0.",
+            status_speed_topic.c_str(),
+            status_speed_reliability.c_str(),
+            speed_topic.c_str(),
+            standstill_threshold_m_s_);
+    }
+    else if (use_status_speed_)
     {
         RCLCPP_INFO(this->get_logger(),
             "Subscribed to status_speed: %s  [QoS: %s]  "
@@ -199,7 +243,10 @@ GpsSpeedNode::GpsSpeedNode(const rclcpp::NodeOptions & options)
     }
 
     RCLCPP_INFO(this->get_logger(), "Publishing speed to:  %s", speed_topic.c_str());
-    RCLCPP_INFO(this->get_logger(), "Waiting for first GPS fix...");
+    if (!use_status_speed_as_primary_)
+    {
+        RCLCPP_INFO(this->get_logger(), "Waiting for first GPS fix...");
+    }
 }
 
 //==============================================================================
@@ -215,13 +262,18 @@ void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float32::SharedPtr
     if (!status_speed_received_.load())
     {
         status_speed_received_.store(true);
+
+        const char * mode_note = use_status_speed_as_primary_
+            ? " MODE: primary speed source — republishing directly to gps_speed."
+            : " MODE: standstill gate — GPS pipeline active above threshold.";
+
         RCLCPP_INFO(this->get_logger(),
             "status_speed topic is live (first message: %.4f m/s, |value|=%.4f m/s). "
-            "Standstill gate is now active — GPS noise below %.3f m/s (abs) "
-            "will be suppressed.%s",
+            "Threshold: %.3f m/s (abs).%s%s",
             msg->data,
             std::abs(msg->data),
             standstill_threshold_m_s_,
+            mode_note,
             // Warn visibly if the first value is negative — indicates a platform
             // that publishes signed encoder noise at standstill (e.g. GeoFog).
             // The abs() gate handles this correctly, but the log makes it explicit.
@@ -229,6 +281,24 @@ void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float32::SharedPtr
                 ? " NOTE: first value is negative — platform publishes signed "
                   "encoder noise at standstill. Gate uses |value| to handle this correctly."
                 : "");
+    }
+
+    // ── Primary mode: bypass GPS pipeline, republish status_speed directly ──
+    //
+    // When use_status_speed_as_primary_=true the entire GPS/Haversine path is
+    // skipped. We publish here in the status_speed callback at the hardware
+    // odometry rate (10 Hz on Clearpath) rather than the GPS rate (9 Hz).
+    //
+    // WHY std::abs(): encoder noise on some platforms (GeoFog) produces small
+    // negative values at standstill. We publish the absolute value so downstream
+    // consumers always receive a non-negative speed. Values below the standstill
+    // threshold are clamped to 0.0 for clean zero output at rest.
+    if (use_status_speed_as_primary_)
+    {
+        const double abs_speed = std::abs(static_cast<double>(msg->data));
+        auto out = std_msgs::msg::Float64();
+        out.data = (abs_speed < standstill_threshold_m_s_) ? 0.0 : abs_speed;
+        speed_pub_->publish(out);
     }
 }
 
@@ -259,6 +329,15 @@ void GpsSpeedNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
 
 void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
 {
+    //--------------------------------------------------------------------------
+    // Primary mode guard: if status_speed is the primary source, all speed
+    // output is handled in status_speed_callback. Nothing to do here.
+    //--------------------------------------------------------------------------
+    if (use_status_speed_as_primary_)
+    {
+        return;
+    }
+
     //--------------------------------------------------------------------------
     // Gate 1: Reject invalid fixes
     //--------------------------------------------------------------------------

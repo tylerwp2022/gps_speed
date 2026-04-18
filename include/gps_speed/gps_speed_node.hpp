@@ -201,6 +201,7 @@ private:
     // --- Parameters ---
     std::string robot_name_;
     bool        use_status_speed_;              ///< Enable standstill gate via status_speed
+    bool        use_status_speed_as_primary_;   ///< Bypass GPS pipeline; republish status_speed directly
     double standstill_threshold_m_s_;           ///< status_speed below this → standstill
     double min_time_delta_s_;                   ///< Skip GPS samples closer together than this
     double min_distance_m_;                     ///< Report 0.0 below this displacement
