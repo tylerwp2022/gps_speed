@@ -178,10 +178,19 @@ void GpsSpeedNode::status_speed_callback(const std_msgs::msg::Float32::SharedPtr
     {
         status_speed_received_.store(true);
         RCLCPP_INFO(this->get_logger(),
-            "status_speed topic is live (first message: %.4f m/s). "
-            "Standstill gate is now active — GPS noise below %.3f m/s "
-            "will be suppressed.",
-            msg->data, standstill_threshold_m_s_);
+            "status_speed topic is live (first message: %.4f m/s, |value|=%.4f m/s). "
+            "Standstill gate is now active — GPS noise below %.3f m/s (abs) "
+            "will be suppressed.%s",
+            msg->data,
+            std::abs(msg->data),
+            standstill_threshold_m_s_,
+            // Warn visibly if the first value is negative — indicates a platform
+            // that publishes signed encoder noise at standstill (e.g. GeoFog).
+            // The abs() gate handles this correctly, but the log makes it explicit.
+            (msg->data < 0.0f)
+                ? " NOTE: first value is negative — platform publishes signed "
+                  "encoder noise at standstill. Gate uses |value| to handle this correctly."
+                : "");
     }
 }
 
@@ -264,16 +273,24 @@ void GpsSpeedNode::gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg
                 ("/" + robot_name_ + "/" +
                  this->get_parameter("status_speed_topic_suffix").as_string()).c_str());
         }
-        else if (latest_status_speed_m_s_.load() < standstill_threshold_m_s_)
+        else if (std::abs(latest_status_speed_m_s_.load()) < standstill_threshold_m_s_)
         {
             // STATE: STANDSTILL — robot is not moving.
             // Suppress GPS noise and invalidate the anchor.
+            //
+            // WHY std::abs(): Some platforms (e.g. GeoFog) publish small negative
+            // status_speed values at true standstill due to encoder noise or reverse
+            // creep. Without abs(), a value like -0.0086 m/s satisfies
+            // (-0.0086 < 0.05) and incorrectly fires the gate, permanently resetting
+            // the GPS anchor and preventing any speed from ever being reported.
+            // Using abs() makes the gate symmetric: both +0.003 and -0.003 correctly
+            // indicate standstill, while +1.2 or -1.2 correctly indicate motion.
             if (prev_sample_.has_value())
             {
                 RCLCPP_DEBUG(this->get_logger(),
-                    "Standstill gate: status_speed=%.4f m/s < %.4f m/s threshold — "
+                    "Standstill gate: |status_speed|=%.4f m/s < %.4f m/s threshold — "
                     "resetting GPS anchor and publishing 0.0.",
-                    latest_status_speed_m_s_.load(), standstill_threshold_m_s_);
+                    std::abs(latest_status_speed_m_s_.load()), standstill_threshold_m_s_);
                 prev_sample_.reset();
             }
 
